@@ -155,6 +155,144 @@ function leagueTypeColor(type) {
 }
 
 /* =============================================================== */
+/* ROSTER RECORD (W / L / D) */
+/* =============================================================== */
+
+function computeRosterRecord(roster) {
+  const settings = roster?.settings || {};
+
+  const wins = settings.wins || 0;
+  const losses = settings.losses || 0;
+  const ties = settings.ties || 0;
+  const totalGames = wins + losses + ties;
+
+  const winPct =
+    totalGames > 0
+      ? (wins + ties * 0.5) / totalGames
+      : null;
+
+  const fpts =
+    (settings.fpts || 0) +
+    (settings.fpts_decimal || 0) / 100;
+
+  const fptsAgainst =
+    (settings.fpts_against || 0) +
+    (settings.fpts_against_decimal || 0) / 100;
+
+  return {
+    wins,
+    losses,
+    ties,
+    totalGames,
+    winPct,
+    fpts,
+    fptsAgainst,
+  };
+}
+
+function recordColor(winPct) {
+  if (winPct === null || winPct === undefined) {
+    return COLORS.textDim;
+  }
+
+  if (winPct > 0.5) return COLORS.turf;
+  if (winPct < 0.5) return COLORS.rival;
+
+  return COLORS.yellow;
+}
+
+function formatRecord({ wins, losses, ties }) {
+  return ties > 0
+    ? `${wins}-${losses}-${ties}`
+    : `${wins}-${losses}`;
+}
+
+function formatWinPct(winPct) {
+  if (winPct === null || winPct === undefined) {
+    return "—";
+  }
+
+  return `${(winPct * 100).toFixed(1)}%`;
+}
+
+/* =============================================================== */
+/* STANDINGS */
+/* =============================================================== */
+
+function computeStandings(rosters) {
+  return (rosters || [])
+    .map((roster) => ({
+      roster,
+      ...computeRosterRecord(roster),
+    }))
+    .sort((a, b) => {
+      if (b.wins !== a.wins) return b.wins - a.wins;
+      if (b.ties !== a.ties) return b.ties - a.ties;
+      return (b.fpts || 0) - (a.fpts || 0);
+    })
+    .map((entry, index) => ({
+      ...entry,
+      rank: index + 1,
+    }));
+}
+
+/* =============================================================== */
+/* PLAYOFF PROJECTION */
+/* =============================================================== */
+/*
+ * Sleeper's public API does not expose an official
+ * "playoff odds" figure. This builds a straightforward
+ * projection from current standings (rank, record, and
+ * points for) plus each league's configured playoff
+ * bracket size — the same inputs a manager would eyeball
+ * on the standings page.
+ */
+
+function getPlayoffProjection({
+  rank,
+  totalTeams,
+  playoffTeams,
+}) {
+  if (!totalTeams) {
+    return {
+      label: "No data",
+      color: COLORS.textDim,
+    };
+  }
+
+  const cutoff =
+    playoffTeams && playoffTeams > 0
+      ? playoffTeams
+      : Math.max(2, Math.ceil(totalTeams / 2));
+
+  if (rank === 1) {
+    return {
+      label: "Projected #1 seed",
+      color: COLORS.yellow,
+    };
+  }
+
+  if (rank <= cutoff) {
+    return {
+      label: "Projected playoff team",
+      color: COLORS.turf,
+    };
+  }
+
+  if (rank <= cutoff + 2) {
+    return {
+      label: "On the bubble",
+      color: COLORS.blue,
+    };
+  }
+
+  return {
+    label: "Projected to miss playoffs",
+    color: COLORS.rival,
+  };
+}
+
+/* =============================================================== */
 /* LOCAL STORAGE */
 /* =============================================================== */
 
@@ -3235,10 +3373,6 @@ export default function SleeperExposure() {
             grid-template-columns:
               1fr 1fr !important;
           }
-
-          .tracker-stats > div:last-child {
-            grid-column: 1 / -1;
-          }
         }
       `}</style>
     </div>
@@ -3277,6 +3411,151 @@ function LeagueTracker({
 
       return counts;
     }, [data]);
+
+  /*
+   * Per-league record, win %, and playoff
+   * projection for the leagues this user
+   * actually has a roster in.
+   */
+  const leagueStandings =
+    useMemo(() => {
+      const map = {};
+
+      (data.owned || []).forEach(
+        ({
+          league,
+          rosters,
+          myRoster,
+        }) => {
+          const standings =
+            computeStandings(rosters);
+
+          const myStanding =
+            standings.find(
+              (s) =>
+                s.roster.roster_id ===
+                myRoster.roster_id
+            );
+
+          if (!myStanding) return;
+
+          const projection =
+            getPlayoffProjection({
+              rank: myStanding.rank,
+              totalTeams:
+                rosters.length,
+              playoffTeams:
+                league.settings
+                  ?.playoff_teams,
+            });
+
+          map[league.league_id] = {
+            wins: myStanding.wins,
+            losses: myStanding.losses,
+            ties: myStanding.ties,
+            winPct: myStanding.winPct,
+            rank: myStanding.rank,
+            totalTeams:
+              rosters.length,
+            projection,
+          };
+        }
+      );
+
+      return map;
+    }, [data]);
+
+  /*
+   * Aggregate summary across whichever leagues
+   * are currently visible (respects the type
+   * filter and search box): overall win %, how
+   * many leagues are winning/losing/even, and
+   * how many are currently on pace for the
+   * playoffs.
+   */
+  const recordSummary =
+    useMemo(() => {
+      let wins = 0;
+      let losses = 0;
+      let ties = 0;
+
+      let winningLeagues = 0;
+      let losingLeagues = 0;
+      let evenLeagues = 0;
+      let ratedLeagues = 0;
+
+      let playoffCount = 0;
+      let projectedLeagues = 0;
+
+      (trackerRows || []).forEach(
+        (league) => {
+          const standing =
+            leagueStandings[
+              league.league_id
+            ];
+
+          if (!standing) return;
+
+          wins += standing.wins;
+          losses += standing.losses;
+          ties += standing.ties;
+
+          const totalGames =
+            standing.wins +
+            standing.losses +
+            standing.ties;
+
+          if (totalGames > 0) {
+            ratedLeagues += 1;
+
+            if (standing.winPct > 0.5) {
+              winningLeagues += 1;
+            } else if (
+              standing.winPct < 0.5
+            ) {
+              losingLeagues += 1;
+            } else {
+              evenLeagues += 1;
+            }
+          }
+
+          projectedLeagues += 1;
+
+          if (
+            standing.projection
+              .label ===
+              "Projected #1 seed" ||
+            standing.projection
+              .label ===
+              "Projected playoff team"
+          ) {
+            playoffCount += 1;
+          }
+        }
+      );
+
+      const totalGames =
+        wins + losses + ties;
+
+      const winPct =
+        totalGames > 0
+          ? (wins + ties * 0.5) /
+            totalGames
+          : null;
+
+      return {
+        winPct,
+        winningLeagues,
+        losingLeagues,
+        evenLeagues,
+        ratedLeagues,
+        playoffCount,
+        projectedLeagues,
+      };
+    }, [
+      trackerRows,
+      leagueStandings,
+    ]);
 
   return (
     <div>
@@ -3380,6 +3659,38 @@ function LeagueTracker({
           }
           accent={
             COLORS.turf
+          }
+        />
+
+        <StatCard
+          icon={TrendingUp}
+          label="Overall win %"
+          value={formatWinPct(
+            recordSummary.winPct
+          )}
+          accent={recordColor(
+            recordSummary.winPct
+          )}
+        />
+
+        <StatCard
+          icon={BarChart3}
+          label="Leagues won-lost-even"
+          value={`${recordSummary.winningLeagues}-${recordSummary.losingLeagues}-${recordSummary.evenLeagues}`}
+          accent={
+            recordSummary.winningLeagues >=
+            recordSummary.losingLeagues
+              ? COLORS.turf
+              : COLORS.rival
+          }
+        />
+
+        <StatCard
+          icon={Trophy}
+          label="On pace for playoffs"
+          value={`${recordSummary.playoffCount}/${recordSummary.projectedLeagues}`}
+          accent={
+            COLORS.yellow
           }
         />
 
@@ -3701,6 +4012,11 @@ function LeagueTracker({
               ] ||
               "—";
 
+            const standing =
+              leagueStandings[
+                league.league_id
+              ];
+
             return (
               <div
                 className="tracker-row tracker-row-grid"
@@ -3790,6 +4106,103 @@ function LeagueTracker({
                           league.league_id
                         }
                       </div>
+
+                      {standing && (
+                        <div
+                          style={{
+                            display:
+                              "flex",
+                            alignItems:
+                              "center",
+                            flexWrap:
+                              "wrap",
+                            gap: 6,
+                            marginTop: 7,
+                          }}
+                        >
+                          {/* Record pill */}
+                          <span
+                            title={`Win rate: ${formatWinPct(
+                              standing.winPct
+                            )}`}
+                            style={{
+                              display:
+                                "inline-flex",
+                              alignItems:
+                                "center",
+                              padding:
+                                "3px 7px",
+                              borderRadius: 5,
+                              background: `${recordColor(
+                                standing.winPct
+                              )}14`,
+                              border: `1px solid ${recordColor(
+                                standing.winPct
+                              )}35`,
+                              color:
+                                recordColor(
+                                  standing.winPct
+                                ),
+                              fontSize: 10,
+                              fontWeight: 800,
+                              fontFamily:
+                                FONT_HEAD,
+                              letterSpacing:
+                                "0.03em",
+                            }}
+                          >
+                            {formatRecord(
+                              standing
+                            )}
+                          </span>
+
+                          {/* Win % */}
+                          <span
+                            style={{
+                              color:
+                                COLORS.textMuted,
+                              fontSize: 9,
+                              fontWeight: 700,
+                            }}
+                          >
+                            {formatWinPct(
+                              standing.winPct
+                            )}{" "}
+                            win rate
+                          </span>
+
+                          {/* Playoff projection pill */}
+                          <span
+                            style={{
+                              display:
+                                "inline-flex",
+                              alignItems:
+                                "center",
+                              padding:
+                                "3px 7px",
+                              borderRadius: 5,
+                              background: `${standing.projection.color}12`,
+                              border: `1px solid ${standing.projection.color}30`,
+                              color:
+                                standing
+                                  .projection
+                                  .color,
+                              fontSize: 9,
+                              fontWeight: 800,
+                              textTransform:
+                                "uppercase",
+                              letterSpacing:
+                                "0.03em",
+                            }}
+                          >
+                            {
+                              standing
+                                .projection
+                                .label
+                            }
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
