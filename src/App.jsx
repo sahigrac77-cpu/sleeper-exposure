@@ -9,6 +9,9 @@ import {
   Trophy,
   ChevronDown,
   ChevronUp,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpDown,
   AlertCircle,
   TrendingUp,
   Zap,
@@ -1266,6 +1269,14 @@ export default function SleeperExposure() {
         .tab-button:hover {
           background: ${COLORS.surfaceRaised} !important;
           color: ${COLORS.text} !important;
+        }
+
+        .tracker-sort-mobile {
+          display: none;
+        }
+
+        .tracker-sort-button:hover {
+          color: ${COLORS.turfBright} !important;
         }
 
         .league-entry {
@@ -3445,6 +3456,10 @@ export default function SleeperExposure() {
             display: none !important;
           }
 
+          .tracker-sort-mobile {
+            display: flex !important;
+          }
+
           .tracker-row-grid {
             grid-template-columns:
               minmax(0, 1fr) 105px !important;
@@ -3506,6 +3521,101 @@ function LeagueTracker({
   // Which league row is open to show full standings.
   const [expandedLeagueId, setExpandedLeagueId] =
     useState(null);
+
+  // List sorting: by league name or entry fee.
+  const [sort, setSort] = useState({
+    key: "name",
+    dir: "asc",
+  });
+
+  // Fee sort order uses a snapshot refreshed on sort-click and
+  // when a fee field loses focus, so rows don't jump around
+  // while a fee is being typed.
+  const [feeSnapshot, setFeeSnapshot] =
+    useState(entryFees);
+
+  function toggleSort(key) {
+    setFeeSnapshot(entryFees);
+
+    setSort((prev) =>
+      prev.key === key
+        ? {
+            key,
+            dir:
+              prev.dir === "asc"
+                ? "desc"
+                : "asc",
+          }
+        : {
+            key,
+            // Highest fee first feels natural; names A–Z.
+            dir:
+              key === "fee"
+                ? "desc"
+                : "asc",
+          }
+    );
+  }
+
+  const sortedRows = useMemo(() => {
+    const rows = [...(trackerRows || [])];
+    const factor =
+      sort.dir === "asc" ? 1 : -1;
+
+    const byName = (a, b) =>
+      (a.name || "").localeCompare(
+        b.name || "",
+        undefined,
+        {
+          sensitivity: "base",
+          numeric: true,
+        }
+      );
+
+    const feeOf = (league) => {
+      const raw =
+        feeSnapshot[league.league_id];
+
+      if (
+        raw === undefined ||
+        raw === null ||
+        raw === ""
+      ) {
+        return null;
+      }
+
+      const n = Number(raw);
+
+      return Number.isFinite(n)
+        ? n
+        : null;
+    };
+
+    rows.sort((a, b) => {
+      if (sort.key === "fee") {
+        const fa = feeOf(a);
+        const fb = feeOf(b);
+
+        // Leagues with no fee entered always sort last.
+        if (fa === null && fb === null) {
+          return byName(a, b);
+        }
+
+        if (fa === null) return 1;
+        if (fb === null) return -1;
+
+        if (fa !== fb) {
+          return (fa - fb) * factor;
+        }
+
+        return byName(a, b);
+      }
+
+      return byName(a, b) * factor;
+    });
+
+    return rows;
+  }, [trackerRows, feeSnapshot, sort]);
 
   const ownedByLeagueId = useMemo(() => {
     const map = {};
@@ -4069,6 +4179,43 @@ function LeagueTracker({
             COLORS.surface,
         }}
       >
+        {/* Sort bar (mobile only; the column header is hidden there) */}
+
+        <div
+          className="tracker-sort-mobile"
+          style={{
+            alignItems: "center",
+            gap: 14,
+            padding: "9px 14px",
+            borderBottom: `1px solid ${COLORS.line}`,
+            background:
+              "rgba(255,255,255,0.015)",
+            color: COLORS.textMuted,
+            fontSize: 9,
+            fontWeight: 800,
+            textTransform: "uppercase",
+            letterSpacing: "0.1em",
+          }}
+        >
+          Sort
+          <SortButton
+            label="League"
+            active={sort.key === "name"}
+            dir={sort.dir}
+            onClick={() =>
+              toggleSort("name")
+            }
+          />
+          <SortButton
+            label="Entry fee"
+            active={sort.key === "fee"}
+            dir={sort.dir}
+            onClick={() =>
+              toggleSort("fee")
+            }
+          />
+        </div>
+
         {/* Header */}
 
         <div
@@ -4096,22 +4243,60 @@ function LeagueTracker({
               "0.1em",
           }}
         >
-          <div>League</div>
+          <div
+            aria-sort={
+              sort.key === "name"
+                ? sort.dir ===
+                  "asc"
+                  ? "ascending"
+                  : "descending"
+                : "none"
+            }
+          >
+            <SortButton
+              label="League"
+              active={
+                sort.key === "name"
+              }
+              dir={sort.dir}
+              onClick={() =>
+                toggleSort("name")
+              }
+            />
+          </div>
           <div>Setting</div>
           <div>Teams</div>
           <div
+            aria-sort={
+              sort.key === "fee"
+                ? sort.dir ===
+                  "asc"
+                  ? "ascending"
+                  : "descending"
+                : "none"
+            }
             style={{
-              textAlign:
-                "right",
+              display: "flex",
+              justifyContent:
+                "flex-end",
             }}
           >
-            Entry fee
+            <SortButton
+              label="Entry fee"
+              active={
+                sort.key === "fee"
+              }
+              dir={sort.dir}
+              onClick={() =>
+                toggleSort("fee")
+              }
+            />
           </div>
         </div>
 
         {/* Rows */}
 
-        {trackerRows.map(
+        {sortedRows.map(
           (league, index) => {
             const type =
               getLeagueType(
@@ -4529,6 +4714,11 @@ function LeagueTracker({
                           e.target.value
                         )
                       }
+                      onBlur={() =>
+                        setFeeSnapshot(
+                          entryFees
+                        )
+                      }
                       placeholder="0.00"
                       aria-label={`Entry fee for ${league.name}`}
                       style={{
@@ -4647,6 +4837,54 @@ function LeagueTracker({
         {data.season} season.
       </div>
     </div>
+  );
+}
+
+/* =============================================================== */
+/* SORT BUTTON (League Tracker column headers) */
+/* =============================================================== */
+
+function SortButton({
+  label,
+  active,
+  dir,
+  onClick,
+}) {
+  const Icon = active
+    ? dir === "asc"
+      ? ArrowUp
+      : ArrowDown
+    : ArrowUpDown;
+
+  return (
+    <button
+      type="button"
+      className="tracker-sort-button"
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        background: "transparent",
+        border: "none",
+        padding: "2px 0",
+        cursor: "pointer",
+        color: active
+          ? COLORS.turfBright
+          : "inherit",
+        font: "inherit",
+        letterSpacing: "inherit",
+        textTransform: "inherit",
+      }}
+    >
+      {label}
+      <Icon
+        size={11}
+        style={{
+          opacity: active ? 1 : 0.55,
+        }}
+      />
+    </button>
   );
 }
 
