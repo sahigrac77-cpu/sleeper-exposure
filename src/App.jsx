@@ -370,6 +370,273 @@ function formatMoney(value) {
 }
 
 /* =============================================================== */
+/* WEEKLY POINTS (projections + actuals) */
+/* =============================================================== */
+/*
+ * Sleeper exposes per-player projections and stats for a week
+ * (PPR points). Projections exist for every scheduled game;
+ * stats only appear once a player's game has started. Anything
+ * that fails to load just yields no data — it never blocks the
+ * rest of the analysis.
+ */
+
+const POINT_POSITIONS = [
+  "QB",
+  "RB",
+  "WR",
+  "TE",
+  "K",
+  "DEF",
+];
+
+async function safeJSONList(url) {
+  try {
+    const res = await fetch(url);
+
+    if (!res.ok) return [];
+
+    const json = await res.json();
+
+    return Array.isArray(json) ? json : [];
+  } catch {
+    return [];
+  }
+}
+
+function toPoints(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const n = Number(value);
+
+  return Number.isFinite(n) ? n : null;
+}
+
+async function fetchWeekPoints(season, week) {
+  const empty = {
+    projections: {},
+    actuals: {},
+  };
+
+  if (!season || !week) return empty;
+
+  const urlFor = (kind, pos) =>
+    `https://api.sleeper.app/${kind}/nfl/${season}/${week}?season_type=regular&position[]=${pos}`;
+
+  const [projectionLists, statLists] =
+    await Promise.all([
+      Promise.all(
+        POINT_POSITIONS.map((pos) =>
+          safeJSONList(
+            urlFor("projections", pos)
+          )
+        )
+      ),
+      Promise.all(
+        POINT_POSITIONS.map((pos) =>
+          safeJSONList(
+            urlFor("stats", pos)
+          )
+        )
+      ),
+    ]);
+
+  const projections = {};
+
+  projectionLists.flat().forEach((entry) => {
+    const pid = entry?.player_id;
+
+    if (!pid) return;
+
+    const pts = toPoints(
+      entry.stats?.pts_ppr
+    );
+
+    if (pts === null) return;
+
+    const updatedAt =
+      entry.updated_at || 0;
+
+    const prev = projections[pid];
+
+    if (!prev || updatedAt > prev.updatedAt) {
+      projections[pid] = {
+        pts,
+        date: entry.date || null,
+        updatedAt,
+      };
+    }
+  });
+
+  const actuals = {};
+
+  statLists.flat().forEach((entry) => {
+    const pid = entry?.player_id;
+
+    if (!pid) return;
+
+    const pts = toPoints(
+      entry.stats?.pts_ppr
+    );
+
+    const prev = actuals[pid];
+
+    // Never let an entry without points replace one with points.
+    if (prev && prev.pts !== null && pts === null) {
+      return;
+    }
+
+    actuals[pid] = {
+      pts,
+      date: entry.date || null,
+    };
+  });
+
+  return { projections, actuals };
+}
+
+let todayFormatter = null;
+
+// Game dates from Sleeper are US Eastern calendar dates.
+function getTodayET() {
+  if (!todayFormatter) {
+    todayFormatter = new Intl.DateTimeFormat(
+      "en-CA",
+      {
+        timeZone: "America/New_York",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }
+    );
+  }
+
+  return todayFormatter.format(new Date());
+}
+
+/*
+ * Decide what to show for a player:
+ *   actual — the game has started/finished and stats exist
+ *   dnp    — the game is over but the player has no stats
+ *   proj   — game still to play, show the projection
+ */
+function resolvePlayerPoints(pid, points) {
+  if (!points || !pid) return null;
+
+  const actual = points.actuals?.[pid];
+  const proj = points.projections?.[pid];
+  const today = getTodayET();
+  const gameDate =
+    actual?.date || proj?.date || null;
+
+  if (actual) {
+    if (actual.pts !== null) {
+      return {
+        kind: "actual",
+        pts: actual.pts,
+        // Same-day games may still be in progress.
+        updating:
+          Boolean(gameDate) &&
+          gameDate >= today,
+      };
+    }
+
+    if (gameDate && gameDate < today) {
+      return { kind: "dnp" };
+    }
+  }
+
+  if (proj) {
+    return { kind: "proj", pts: proj.pts };
+  }
+
+  return null;
+}
+
+function PointsPill({ info }) {
+  if (!info) return null;
+
+  if (info.kind === "dnp") {
+    return (
+      <span
+        title="Did not play"
+        style={{
+          padding: "2px 5px",
+          borderRadius: 4,
+          background:
+            "rgba(145,162,151,0.07)",
+          color: COLORS.textMuted,
+          fontSize: 9,
+          fontWeight: 800,
+          letterSpacing: "0.05em",
+          whiteSpace: "nowrap",
+        }}
+      >
+        DNP
+      </span>
+    );
+  }
+
+  const isActual = info.kind === "actual";
+
+  const color = isActual
+    ? COLORS.turfBright
+    : COLORS.blue;
+
+  const title = isActual
+    ? info.updating
+      ? "Actual PPR points so far — game day, may still be updating"
+      : "Final actual PPR points"
+    : "Projected PPR points for this week";
+
+  return (
+    <span
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "2px 5px",
+        borderRadius: 4,
+        background: isActual
+          ? "rgba(145,242,118,0.10)"
+          : "rgba(85,168,232,0.10)",
+        color,
+        fontSize: 8,
+        fontWeight: 800,
+        letterSpacing: "0.05em",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {isActual && info.updating && (
+        <span
+          className="pulse"
+          style={{
+            width: 5,
+            height: 5,
+            borderRadius: "50%",
+            background: color,
+          }}
+        />
+      )}
+
+      {isActual ? "ACTUAL" : "PROJ"}
+
+      <span
+        style={{
+          fontFamily: FONT_HEAD,
+          fontSize: 12,
+          letterSpacing: 0,
+        }}
+      >
+        {info.pts.toFixed(1)}
+      </span>
+    </span>
+  );
+}
+
+/* =============================================================== */
 /* MAIN APP */
 /* =============================================================== */
 
@@ -485,6 +752,13 @@ export default function SleeperExposure() {
         `Pulling rosters and matchups from ${leagues.length} league${
           leagues.length === 1 ? "" : "s"
         }…`
+      );
+
+      // Projections/actuals load alongside the league data.
+      // fetchWeekPoints never rejects, so it can't fail the run.
+      const weekPointsPromise = fetchWeekPoints(
+        season,
+        week
       );
 
       const leagueBundles = await Promise.all(
@@ -685,10 +959,15 @@ export default function SleeperExposure() {
 
       setEntryFees(savedFees);
 
+      const weekPoints = await weekPointsPromise;
+
       setData({
         user,
         season,
         week,
+
+        /* Per-player projections + actuals for `week` */
+        points: weekPoints,
 
         /*
          * Keep ALL leagues separately for the
@@ -2233,6 +2512,7 @@ export default function SleeperExposure() {
                       total={
                         data.totalLeagues
                       }
+                      points={data.points}
                       emptyText="No starters found for this week — double check the week number."
                     />
 
@@ -2252,6 +2532,7 @@ export default function SleeperExposure() {
                       total={
                         data.totalLeagues
                       }
+                      points={data.points}
                       emptyText="No opposing starters found — matchups may not be set for this week yet."
                     />
                   </div>
@@ -2863,6 +3144,13 @@ export default function SleeperExposure() {
                                       ? ""
                                       : "s"}
                                   </span>
+
+                                  <PointsPill
+                                    info={resolvePlayerPoints(
+                                      r.pid,
+                                      data.points
+                                    )}
+                                  />
                                 </div>
                               </div>
 
@@ -3507,6 +3795,28 @@ export default function SleeperExposure() {
 /* LEAGUE TRACKER */
 /* =============================================================== */
 
+function getTeamName(users, roster) {
+  const owner = (users || []).find(
+    (u) => u.user_id === roster?.owner_id
+  );
+
+  return (
+    owner?.metadata?.team_name ||
+    owner?.display_name ||
+    (roster
+      ? `Team ${roster.roster_id}`
+      : "Unknown team")
+  );
+}
+
+function formatMatchupPoints(value) {
+  const n = Number(value);
+
+  return Number.isFinite(n)
+    ? n.toFixed(2)
+    : "0.00";
+}
+
 function LeagueTracker({
   data,
   entryFees,
@@ -3623,6 +3933,79 @@ function LeagueTracker({
     (data.owned || []).forEach((bundle) => {
       map[bundle.league.league_id] = bundle;
     });
+
+    return map;
+  }, [data]);
+
+  /*
+   * This week's head-to-head for each league: both team names,
+   * their W-L records, and the current score. Built from the
+   * matchup data already loaded for the analyzed week.
+   */
+  const leagueMatchups = useMemo(() => {
+    const map = {};
+
+    (data.owned || []).forEach(
+      ({
+        league,
+        rosters,
+        users,
+        matchups,
+        myRoster,
+      }) => {
+        const mine = (matchups || []).find(
+          (m) =>
+            m.roster_id ===
+            myRoster.roster_id
+        );
+
+        if (!mine || mine.matchup_id == null) {
+          return;
+        }
+
+        const opp = matchups.find(
+          (m) =>
+            m.matchup_id ===
+              mine.matchup_id &&
+            m.roster_id !==
+              myRoster.roster_id
+        );
+
+        if (!opp) return;
+
+        const oppRoster = rosters.find(
+          (r) =>
+            r.roster_id === opp.roster_id
+        );
+
+        map[league.league_id] = {
+          me: {
+            name: getTeamName(
+              users,
+              myRoster
+            ),
+            record: formatRecord(
+              computeRosterRecord(myRoster)
+            ),
+            points: Number(mine.points) || 0,
+          },
+          opp: {
+            name: getTeamName(
+              users,
+              oppRoster
+            ),
+            record: oppRoster
+              ? formatRecord(
+                  computeRosterRecord(
+                    oppRoster
+                  )
+                )
+              : "—",
+            points: Number(opp.points) || 0,
+          },
+        };
+      }
+    );
 
     return map;
   }, [data]);
@@ -4325,6 +4708,11 @@ function LeagueTracker({
                 league.league_id
               ];
 
+            const matchup =
+              leagueMatchups[
+                league.league_id
+              ];
+
             const leagueBundle =
               ownedByLeagueId[
                 league.league_id
@@ -4572,6 +4960,128 @@ function LeagueTracker({
                                 .projection
                                 .label
                             }
+                          </span>
+                        </div>
+                      )}
+
+                      {matchup && (
+                        <div
+                          title={`Week ${data.week} matchup`}
+                          style={{
+                            display:
+                              "flex",
+                            alignItems:
+                              "center",
+                            flexWrap:
+                              "wrap",
+                            columnGap: 6,
+                            rowGap: 2,
+                            marginTop: 7,
+                            fontSize: 10,
+                            color:
+                              COLORS.textDim,
+                          }}
+                        >
+                          <span
+                            style={{
+                              color:
+                                COLORS.textMuted,
+                              fontSize: 8,
+                              fontWeight: 800,
+                              letterSpacing:
+                                "0.06em",
+                              textTransform:
+                                "uppercase",
+                            }}
+                          >
+                            Wk {data.week}
+                          </span>
+
+                          <span>
+                            <strong
+                              style={{
+                                color:
+                                  COLORS.text,
+                              }}
+                            >
+                              {
+                                matchup.me
+                                  .name
+                              }
+                            </strong>{" "}
+                            ({matchup.me.record}){" "}
+                            <strong
+                              style={{
+                                fontFamily:
+                                  FONT_HEAD,
+                                fontSize: 12,
+                                color:
+                                  matchup.me
+                                    .points >
+                                  matchup.opp
+                                    .points
+                                    ? COLORS.turf
+                                    : matchup.me
+                                        .points <
+                                      matchup.opp
+                                        .points
+                                    ? COLORS.textDim
+                                    : COLORS.yellow,
+                              }}
+                            >
+                              {formatMatchupPoints(
+                                matchup.me
+                                  .points
+                              )}
+                            </strong>
+                          </span>
+
+                          <span
+                            style={{
+                              color:
+                                COLORS.textMuted,
+                            }}
+                          >
+                            vs
+                          </span>
+
+                          <span>
+                            <strong
+                              style={{
+                                color:
+                                  COLORS.text,
+                              }}
+                            >
+                              {
+                                matchup.opp
+                                  .name
+                              }
+                            </strong>{" "}
+                            ({matchup.opp.record}){" "}
+                            <strong
+                              style={{
+                                fontFamily:
+                                  FONT_HEAD,
+                                fontSize: 12,
+                                color:
+                                  matchup.opp
+                                    .points >
+                                  matchup.me
+                                    .points
+                                    ? COLORS.rival
+                                    : matchup.opp
+                                        .points <
+                                      matchup.me
+                                        .points
+                                    ? COLORS.textDim
+                                    : COLORS.yellow,
+                              }}
+                            >
+                              {formatMatchupPoints(
+                                matchup.opp
+                                  .points
+                              )}
+                            </strong>
                           </span>
                         </div>
                       )}
@@ -5237,6 +5747,7 @@ function ExposurePanel({
   rows,
   total,
   emptyText,
+  points,
 }) {
   return (
     <div
@@ -5347,6 +5858,10 @@ function ExposurePanel({
               total={total}
               color={color}
               rank={index + 1}
+              pointsInfo={resolvePlayerPoints(
+                row.pid,
+                points
+              )}
             />
           )
         )
@@ -5364,6 +5879,7 @@ function MiniExposureRow({
   total,
   color,
   rank,
+  pointsInfo,
 }) {
   const pct = Math.round(
     (row.starterCount /
@@ -5456,6 +5972,8 @@ function MiniExposureRow({
           >
             {row.position}
           </span>
+
+          <PointsPill info={pointsInfo} />
         </div>
 
         <div
