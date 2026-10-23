@@ -382,6 +382,11 @@ export default function SleeperExposure() {
   const [sortKey, setSortKey] = useState("count");
   const [expanded, setExpanded] = useState(null);
 
+  // Which league row (inside an expanded player) is open
+  // to show full league standings. Keyed `${pid}:${leagueId}`.
+  const [expandedLeague, setExpandedLeague] =
+    useState(null);
+
   // Exposure filters
   const [leagueTypeFilter, setLeagueTypeFilter] =
     useState("all");
@@ -421,6 +426,7 @@ export default function SleeperExposure() {
     setStatus("loading");
     setData(null);
     setExpanded(null);
+    setExpandedLeague(null);
 
     // Reset exposure filters
     setLeagueTypeFilter("all");
@@ -783,6 +789,20 @@ export default function SleeperExposure() {
       team: p.team || "FA",
     };
   };
+
+  /* ============================================================= */
+  /* LEAGUE LOOKUP (for standings in the breakdown) */
+  /* ============================================================= */
+
+  const ownedByLeagueId = useMemo(() => {
+    const map = {};
+
+    (data?.owned || []).forEach((bundle) => {
+      map[bundle.league.league_id] = bundle;
+    });
+
+    return map;
+  }, [data]);
 
   /* ============================================================= */
   /* ALL EXPOSURE ROWS */
@@ -1246,6 +1266,19 @@ export default function SleeperExposure() {
         .tab-button:hover {
           background: ${COLORS.surfaceRaised} !important;
           color: ${COLORS.text} !important;
+        }
+
+        .league-entry {
+          transition: background 150ms ease;
+        }
+
+        .league-entry:hover {
+          background: ${COLORS.surfaceHover} !important;
+        }
+
+        .league-entry:focus-visible {
+          outline: 2px solid ${COLORS.turf};
+          outline-offset: 1px;
         }
 
         .tracker-row {
@@ -2979,9 +3012,48 @@ export default function SleeperExposure() {
                                     (
                                       entry,
                                       idx
-                                    ) => (
+                                    ) => {
+                                      const leagueKey = `${r.pid}:${entry.leagueId}`;
+                                      const leagueOpen =
+                                        expandedLeague ===
+                                        leagueKey;
+                                      const leagueBundle =
+                                        ownedByLeagueId[
+                                          entry.leagueId
+                                        ];
+
+                                      return (
                                       <div
                                         key={`${entry.leagueId}-${idx}`}
+                                      >
+                                      <div
+                                        className="league-entry"
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-expanded={
+                                          leagueOpen
+                                        }
+                                        onClick={() =>
+                                          setExpandedLeague(
+                                            leagueOpen
+                                              ? null
+                                              : leagueKey
+                                          )
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (
+                                            e.key ===
+                                              "Enter" ||
+                                            e.key === " "
+                                          ) {
+                                            e.preventDefault();
+                                            setExpandedLeague(
+                                              leagueOpen
+                                                ? null
+                                                : leagueKey
+                                            );
+                                          }
+                                        }}
                                         style={{
                                           display:
                                             "flex",
@@ -2989,7 +3061,17 @@ export default function SleeperExposure() {
                                             "center",
                                           gap: 9,
                                           minHeight:
-                                            26,
+                                            30,
+                                          padding:
+                                            "2px 8px",
+                                          marginLeft: -8,
+                                          borderRadius: 6,
+                                          cursor:
+                                            "pointer",
+                                          background:
+                                            leagueOpen
+                                              ? COLORS.surfaceRaised
+                                              : "transparent",
                                           fontSize: 11,
                                           color:
                                             COLORS.textDim,
@@ -3063,8 +3145,35 @@ export default function SleeperExposure() {
                                             BENCH
                                           </span>
                                         )}
+
+                                        {leagueOpen ? (
+                                          <ChevronUp
+                                            size={13}
+                                            color={
+                                              COLORS.textDim
+                                            }
+                                          />
+                                        ) : (
+                                          <ChevronDown
+                                            size={13}
+                                            color={
+                                              COLORS.textDim
+                                            }
+                                          />
+                                        )}
                                       </div>
-                                    )
+
+                                      {leagueOpen &&
+                                        leagueBundle && (
+                                          <LeagueStandingsTable
+                                            bundle={
+                                              leagueBundle
+                                            }
+                                          />
+                                        )}
+                                      </div>
+                                      );
+                                    }
                                   )}
                                 </div>
                               </div>
@@ -4408,6 +4517,245 @@ function LeagueTracker({
         Entry fees are saved locally
         for your Sleeper account and{" "}
         {data.season} season.
+      </div>
+    </div>
+  );
+}
+
+/* =============================================================== */
+/* LEAGUE STANDINGS TABLE (expanded league in Exposure tab) */
+/* =============================================================== */
+
+function LeagueStandingsTable({ bundle }) {
+  const { league, rosters, users, myRoster } = bundle;
+
+  const standings = useMemo(
+    () => computeStandings(rosters),
+    [rosters]
+  );
+
+  const totalTeams = standings.length;
+
+  const configuredPlayoffTeams =
+    league.settings?.playoff_teams;
+
+  const hasConfiguredCutoff =
+    Number.isFinite(configuredPlayoffTeams) &&
+    configuredPlayoffTeams > 0;
+
+  // Same fallback used by the playoff projection.
+  const playoffTeams = hasConfiguredCutoff
+    ? Math.min(configuredPlayoffTeams, totalTeams)
+    : Math.max(2, Math.ceil(totalTeams / 2));
+
+  const hasTies = standings.some((s) => s.ties > 0);
+  const gamesPlayed = standings.some(
+    (s) => s.totalGames > 0
+  );
+
+  const columns = hasTies
+    ? "30px minmax(130px, 1fr) 40px 40px 40px 72px 72px"
+    : "30px minmax(130px, 1fr) 44px 44px 72px 72px";
+
+  function teamName(roster) {
+    const owner = users.find(
+      (u) => u.user_id === roster.owner_id
+    );
+
+    return (
+      owner?.metadata?.team_name ||
+      owner?.display_name ||
+      `Team ${roster.roster_id}`
+    );
+  }
+
+  const headerCell = {
+    fontSize: 9,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: "0.09em",
+    color: COLORS.textMuted,
+  };
+
+  const numCell = {
+    textAlign: "right",
+    fontVariantNumeric: "tabular-nums",
+  };
+
+  return (
+    <div
+      style={{
+        margin: "6px 0 10px",
+        border: `1px solid ${COLORS.line}`,
+        borderRadius: 10,
+        background: COLORS.surface,
+        overflowX: "auto",
+      }}
+    >
+      <div style={{ minWidth: 380 }}>
+        {/* Header */}
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: columns,
+            gap: 8,
+            alignItems: "center",
+            padding: "8px 12px",
+            borderBottom: `1px solid ${COLORS.line}`,
+            background: "rgba(255,255,255,0.015)",
+          }}
+        >
+          <div style={headerCell}>#</div>
+          <div style={headerCell}>Team</div>
+          <div style={{ ...headerCell, ...numCell }}>W</div>
+          <div style={{ ...headerCell, ...numCell }}>L</div>
+          {hasTies && (
+            <div style={{ ...headerCell, ...numCell }}>T</div>
+          )}
+          <div style={{ ...headerCell, ...numCell }}>PF</div>
+          <div style={{ ...headerCell, ...numCell }}>PA</div>
+        </div>
+
+        {/* Rows */}
+
+        {standings.map((s, i) => {
+          const isMe =
+            s.roster.roster_id === myRoster.roster_id;
+
+          const inPlayoffs = s.rank <= playoffTeams;
+          const isLastIn = s.rank === playoffTeams;
+
+          return (
+            <div key={s.roster.roster_id}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: columns,
+                  gap: 8,
+                  alignItems: "center",
+                  padding: "7px 12px",
+                  fontSize: 11,
+                  color: COLORS.textDim,
+                  background: isMe
+                    ? "rgba(101,198,83,0.10)"
+                    : "transparent",
+                  borderTop:
+                    i === 0
+                      ? "none"
+                      : `1px solid ${COLORS.line}`,
+                  borderLeft: `3px solid ${
+                    isMe
+                      ? COLORS.turf
+                      : inPlayoffs
+                      ? "rgba(101,198,83,0.35)"
+                      : "transparent"
+                  }`,
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: 800,
+                    color: inPlayoffs
+                      ? COLORS.turf
+                      : COLORS.textMuted,
+                  }}
+                >
+                  {s.rank}
+                </div>
+
+                <div
+                  style={{
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontWeight: isMe ? 700 : 500,
+                    color: isMe
+                      ? COLORS.text
+                      : COLORS.textDim,
+                  }}
+                >
+                  {teamName(s.roster)}
+                  {isMe && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontSize: 8,
+                        fontWeight: 800,
+                        letterSpacing: "0.06em",
+                        color: COLORS.turf,
+                      }}
+                    >
+                      YOU
+                    </span>
+                  )}
+                </div>
+
+                <div
+                  style={{
+                    ...numCell,
+                    color: COLORS.text,
+                    fontWeight: 700,
+                  }}
+                >
+                  {s.wins}
+                </div>
+
+                <div style={numCell}>{s.losses}</div>
+
+                {hasTies && (
+                  <div style={numCell}>{s.ties}</div>
+                )}
+
+                <div style={{ ...numCell, color: COLORS.text }}>
+                  {s.fpts.toFixed(2)}
+                </div>
+
+                <div style={numCell}>
+                  {s.fptsAgainst.toFixed(2)}
+                </div>
+              </div>
+
+              {/* Playoff line */}
+
+              {isLastIn && i < standings.length - 1 && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "3px 12px",
+                    borderTop: `1px dashed ${COLORS.turf}`,
+                    background: "rgba(101,198,83,0.05)",
+                    color: COLORS.turf,
+                    fontSize: 8,
+                    fontWeight: 800,
+                    letterSpacing: "0.09em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Playoff line · top {playoffTeams} advance
+                  {!hasConfiguredCutoff && " (estimated)"}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {!gamesPlayed && (
+          <div
+            style={{
+              padding: "8px 12px",
+              borderTop: `1px solid ${COLORS.line}`,
+              color: COLORS.textMuted,
+              fontSize: 10,
+            }}
+          >
+            No games played yet — standings will fill in as
+            the season progresses.
+          </div>
+        )}
       </div>
     </div>
   );
