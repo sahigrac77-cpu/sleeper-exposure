@@ -3503,6 +3503,20 @@ function LeagueTracker({
   trackerRows,
   trackerStats,
 }) {
+  // Which league row is open to show full standings.
+  const [expandedLeagueId, setExpandedLeagueId] =
+    useState(null);
+
+  const ownedByLeagueId = useMemo(() => {
+    const map = {};
+
+    (data.owned || []).forEach((bundle) => {
+      map[bundle.league.league_id] = bundle;
+    });
+
+    return map;
+  }, [data]);
+
   const rosterCounts =
     useMemo(() => {
       const counts = {};
@@ -4126,13 +4140,77 @@ function LeagueTracker({
                 league.league_id
               ];
 
+            const leagueBundle =
+              ownedByLeagueId[
+                league.league_id
+              ];
+
+            const canExpand =
+              Boolean(leagueBundle);
+
+            const isOpen =
+              canExpand &&
+              expandedLeagueId ===
+                league.league_id;
+
+            const toggleLeague = () =>
+              setExpandedLeagueId(
+                isOpen
+                  ? null
+                  : league.league_id
+              );
+
             return (
               <div
-                className="tracker-row tracker-row-grid"
                 key={
                   league.league_id
                 }
+              >
+              <div
+                className="tracker-row tracker-row-grid"
+                role={
+                  canExpand
+                    ? "button"
+                    : undefined
+                }
+                tabIndex={
+                  canExpand ? 0 : undefined
+                }
+                aria-expanded={
+                  canExpand
+                    ? isOpen
+                    : undefined
+                }
+                onClick={
+                  canExpand
+                    ? toggleLeague
+                    : undefined
+                }
+                onKeyDown={
+                  canExpand
+                    ? (e) => {
+                        // Ignore keys typed in the fee input.
+                        if (
+                          e.target !==
+                          e.currentTarget
+                        )
+                          return;
+
+                        if (
+                          e.key ===
+                            "Enter" ||
+                          e.key === " "
+                        ) {
+                          e.preventDefault();
+                          toggleLeague();
+                        }
+                      }
+                    : undefined
+                }
                 style={{
+                  cursor: canExpand
+                    ? "pointer"
+                    : "default",
                   display: "grid",
                   gridTemplateColumns:
                     "minmax(260px,1fr) 130px 90px 140px",
@@ -4313,6 +4391,33 @@ function LeagueTracker({
                         </div>
                       )}
                     </div>
+
+                    {canExpand &&
+                      (isOpen ? (
+                        <ChevronUp
+                          size={15}
+                          color={
+                            COLORS.textDim
+                          }
+                          style={{
+                            flexShrink: 0,
+                            marginLeft:
+                              "auto",
+                          }}
+                        />
+                      ) : (
+                        <ChevronDown
+                          size={15}
+                          color={
+                            COLORS.textDim
+                          }
+                          style={{
+                            flexShrink: 0,
+                            marginLeft:
+                              "auto",
+                          }}
+                        />
+                      ))}
                   </div>
                 </div>
 
@@ -4380,7 +4485,11 @@ function LeagueTracker({
                     justifyContent:
                       "flex-end",
                     gap: 7,
+                    cursor: "default",
                   }}
+                  onClick={(e) =>
+                    e.stopPropagation()
+                  }
                 >
                   <div
                     style={{
@@ -4464,6 +4573,25 @@ function LeagueTracker({
                       </span>
                     )}
                 </div>
+              </div>
+
+              {isOpen && (
+                <div
+                  style={{
+                    padding:
+                      "4px 16px 10px 29px",
+                    background:
+                      COLORS.bg,
+                    borderTop: `1px solid ${COLORS.line}`,
+                  }}
+                >
+                  <LeagueStandingsTable
+                    bundle={
+                      leagueBundle
+                    }
+                  />
+                </div>
+              )}
               </div>
             );
           }
